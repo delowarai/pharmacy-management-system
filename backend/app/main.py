@@ -17,6 +17,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, rela
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./pharmacy.db")
 JWT_SECRET = os.getenv("JWT_SECRET", "development-only-change-me")
 ACCESS_TOKEN_MINUTES = int(os.getenv("ACCESS_TOKEN_MINUTES", "480"))
+INITIAL_ADMIN_USERNAME = os.getenv("INITIAL_ADMIN_USERNAME", "admin")
+INITIAL_ADMIN_PASSWORD = os.getenv("INITIAL_ADMIN_PASSWORD", "Admin@123")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 password_hash = PasswordHash.recommended()
@@ -116,6 +118,50 @@ class Expense(Base):
     date: Mapped[date] = mapped_column(Date, default=date.today)
 
 
+class Payment(Base):
+    __tablename__ = "payments"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    party_id: Mapped[int] = mapped_column(ForeignKey("parties.id"), index=True)
+    transaction_id: Mapped[int | None] = mapped_column(ForeignKey("transactions.id"), nullable=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+    method: Mapped[str] = mapped_column(String(30), default="cash")
+    note: Mapped[str] = mapped_column(String(250), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class Prescription(Base):
+    __tablename__ = "prescriptions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    customer_id: Mapped[int | None] = mapped_column(ForeignKey("parties.id"), nullable=True)
+    patient_name: Mapped[str] = mapped_column(String(140))
+    doctor_name: Mapped[str] = mapped_column(String(140), default="")
+    prescription_date: Mapped[date] = mapped_column(Date, default=date.today)
+    medicine_notes: Mapped[str] = mapped_column(String(1000), default="")
+    notes: Mapped[str] = mapped_column(String(1000), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ReturnRecord(Base):
+    __tablename__ = "returns"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey("transactions.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    total: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    reason: Mapped[str] = mapped_column(String(250), default="")
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class ReturnItem(Base):
+    __tablename__ = "return_items"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    return_id: Mapped[int] = mapped_column(ForeignKey("returns.id"), index=True)
+    transaction_item_id: Mapped[int] = mapped_column(ForeignKey("transaction_items.id"))
+    batch_id: Mapped[int] = mapped_column(ForeignKey("batches.id"))
+    qty: Mapped[int]
+    total: Mapped[Decimal] = mapped_column(Numeric(12, 2))
+
+
 class Audit(Base):
     __tablename__ = "audit_logs"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -185,6 +231,46 @@ class ExpenseIn(BaseModel):
     date: date = Field(default_factory=date.today)
 
 
+class UserIn(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    username: str = Field(min_length=3, max_length=60)
+    email: EmailStr | None = None
+    password: str = Field(min_length=8, max_length=128)
+    role: str = "sales"
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+class PaymentIn(BaseModel):
+    party_id: int
+    transaction_id: int | None = None
+    amount: Decimal = Field(gt=0)
+    method: str = "cash"
+    note: str = ""
+
+
+class PrescriptionIn(BaseModel):
+    customer_id: int | None = None
+    patient_name: str = Field(min_length=2, max_length=140)
+    doctor_name: str = ""
+    prescription_date: date = Field(default_factory=date.today)
+    medicine_notes: str = ""
+    notes: str = ""
+
+
+class ReturnItemIn(BaseModel):
+    transaction_item_id: int
+    qty: int = Field(gt=0)
+
+
+class ReturnIn(BaseModel):
+    items: list[ReturnItemIn] = Field(min_length=1)
+    reason: str = ""
+
+
 def db_session():
     db = SessionLocal()
     try:
@@ -223,8 +309,8 @@ app.add_middleware(CORSMiddleware, allow_origins=origins, allow_credentials=True
 def startup():
     Base.metadata.create_all(engine)
     with SessionLocal() as db:
-        if not db.scalar(select(User).where(User.username == "admin")):
-            db.add(User(name="Administrator", username="admin", email="admin@example.com", password_hash=password_hash.hash("Admin@123"), role="admin"))
+        if not db.scalar(select(User).where(User.username == INITIAL_ADMIN_USERNAME)):
+            db.add(User(name="Administrator", username=INITIAL_ADMIN_USERNAME, email="admin@example.com", password_hash=password_hash.hash(INITIAL_ADMIN_PASSWORD), role="admin"))
             db.commit()
 
 
@@ -246,6 +332,16 @@ def login(form: Annotated[OAuth2PasswordRequestForm, Depends()], db: Db):
 @app.get("/api/auth/me")
 def me(user: CurrentUser):
     return {"id": user.id, "name": user.name, "username": user.username, "role": user.role}
+
+
+@app.post("/api/auth/change-password")
+def change_password(data: PasswordChange, db: Db, user: CurrentUser):
+    if not password_hash.verify(data.current_password, user.password_hash):
+        raise HTTPException(400, "Current password is incorrect")
+    user.password_hash = password_hash.hash(data.new_password)
+    audit(db, user, "change-password", "auth", user.id)
+    db.commit()
+    return {"message": "Password changed successfully"}
 
 
 @app.get("/api/medicines")
@@ -286,18 +382,95 @@ def adjust(batch_id: int, qty_change: int, reason: str, db: Db, user: CurrentUse
     return {"ok": True, "qty": b.qty}
 
 
-@app.get("/api/{kind}")
-def parties(kind: str, db: Db, user: CurrentUser):
-    if kind not in ("customers", "suppliers"): raise HTTPException(404)
-    singular = kind[:-1]
-    return db.scalars(select(Party).where(Party.kind == singular).order_by(Party.name)).all()
+@app.get("/api/users")
+def list_users(db: Db, user: CurrentUser):
+    if user.role not in ("admin", "manager"): raise HTTPException(403, "Permission denied")
+    rows = db.scalars(select(User).order_by(User.name)).all()
+    return [{"id": row.id, "name": row.name, "username": row.username, "email": row.email, "role": row.role, "active": row.active, "created_at": row.created_at} for row in rows]
 
 
-@app.post("/api/{kind}")
-def create_party(kind: str, data: PartyIn, db: Db, user: CurrentUser):
-    if kind not in ("customers", "suppliers"): raise HTTPException(404)
-    p = Party(kind=kind[:-1], **data.model_dump()); db.add(p); db.flush(); audit(db, user, "create", kind[:-1], p.id); db.commit(); db.refresh(p)
+@app.post("/api/users")
+def create_user(data: UserIn, db: Db, user: CurrentUser):
+    if user.role != "admin": raise HTTPException(403, "Admin permission required")
+    if data.role not in ("admin", "manager", "pharmacist", "sales"): raise HTTPException(400, "Invalid role")
+    if db.scalar(select(User).where(User.username == data.username)): raise HTTPException(409, "Username already exists")
+    row = User(name=data.name, username=data.username, email=str(data.email) if data.email else None, password_hash=password_hash.hash(data.password), role=data.role)
+    db.add(row); db.flush(); audit(db, user, "create", "user", row.id); db.commit(); db.refresh(row)
+    return {"id": row.id, "name": row.name, "username": row.username, "role": row.role, "active": row.active}
+
+
+@app.patch("/api/users/{user_id}/status")
+def set_user_status(user_id: int, active: bool, db: Db, user: CurrentUser):
+    if user.role != "admin": raise HTTPException(403, "Admin permission required")
+    target = db.get(User, user_id)
+    if not target: raise HTTPException(404, "User not found")
+    if target.id == user.id and not active: raise HTTPException(400, "You cannot disable your own account")
+    target.active = active; audit(db, user, "activate" if active else "deactivate", "user", target.id); db.commit()
+    return {"id": target.id, "active": target.active}
+
+
+@app.get("/api/prescriptions")
+def list_prescriptions(db: Db, user: CurrentUser):
+    return db.scalars(select(Prescription).order_by(Prescription.prescription_date.desc())).all()
+
+
+@app.post("/api/prescriptions")
+def add_prescription(data: PrescriptionIn, db: Db, user: CurrentUser):
+    if data.customer_id:
+        customer = db.get(Party, data.customer_id)
+        if not customer or customer.kind != "customer": raise HTTPException(400, "Invalid customer")
+    row = Prescription(**data.model_dump()); db.add(row); db.flush(); audit(db, user, "create", "prescription", row.id); db.commit(); db.refresh(row)
+    return row
+
+
+@app.post("/api/payments")
+def add_payment(data: PaymentIn, db: Db, user: CurrentUser):
+    party = db.get(Party, data.party_id)
+    if not party: raise HTTPException(404, "Customer or supplier not found")
+    amount = min(data.amount, party.balance)
+    if amount <= 0: raise HTTPException(400, "This account has no outstanding balance")
+    if data.transaction_id:
+        tx = db.get(Transaction, data.transaction_id)
+        if not tx or tx.party_id != party.id: raise HTTPException(400, "Invalid transaction")
+        amount = min(amount, tx.due)
+        tx.paid += amount; tx.due -= amount
+    row = Payment(party_id=party.id, transaction_id=data.transaction_id, amount=amount, method=data.method, note=data.note)
+    party.balance -= amount; db.add(row); db.flush(); audit(db, user, "collect" if party.kind == "customer" else "pay", "payment", row.id); db.commit(); db.refresh(row)
+    return row
+
+
+@app.get("/api/parties/{party_id}/ledger")
+def party_ledger(party_id: int, db: Db, user: CurrentUser):
+    party = db.get(Party, party_id)
+    if not party: raise HTTPException(404, "Customer or supplier not found")
+    txs = db.scalars(select(Transaction).where(Transaction.party_id == party.id).order_by(Transaction.created_at.desc())).all()
+    payments = db.scalars(select(Payment).where(Payment.party_id == party.id).order_by(Payment.created_at.desc())).all()
+    return {"party": party, "transactions": txs, "payments": payments, "balance": party.balance}
+
+
+def list_parties(kind: str, db: Session):
+    return db.scalars(select(Party).where(Party.kind == kind).order_by(Party.name)).all()
+
+
+def create_party_record(kind: str, data: PartyIn, db: Session, user: User):
+    p = Party(kind=kind, **data.model_dump()); db.add(p); db.flush(); audit(db, user, "create", kind, p.id); db.commit(); db.refresh(p)
     return p
+
+
+@app.get("/api/customers")
+def customers(db: Db, user: CurrentUser): return list_parties("customer", db)
+
+
+@app.post("/api/customers")
+def create_customer(data: PartyIn, db: Db, user: CurrentUser): return create_party_record("customer", data, db, user)
+
+
+@app.get("/api/suppliers")
+def suppliers(db: Db, user: CurrentUser): return list_parties("supplier", db)
+
+
+@app.post("/api/suppliers")
+def create_supplier(data: PartyIn, db: Db, user: CurrentUser): return create_party_record("supplier", data, db, user)
 
 
 def make_tx(kind: str, data: TxIn, db: Session, user: User):
@@ -353,11 +526,60 @@ def create_sale(data: TxIn, db: Db, user: CurrentUser): return make_tx("sale", d
 def create_purchase(data: TxIn, db: Db, user: CurrentUser): return make_tx("purchase", data, db, user)
 
 
+def process_return(transaction_id: int, expected_kind: str, data: ReturnIn, db: Session, user: User):
+    tx = db.get(Transaction, transaction_id)
+    if not tx or tx.kind != expected_kind: raise HTTPException(404, f"{expected_kind.title()} not found")
+    record = ReturnRecord(transaction_id=tx.id, kind=expected_kind, total=0, reason=data.reason, user_id=user.id)
+    db.add(record); db.flush(); total = Decimal("0")
+    for requested in data.items:
+        original = db.get(TransactionItem, requested.transaction_item_id)
+        if not original or original.transaction_id != tx.id: raise HTTPException(400, "Invalid return item")
+        returned_before = db.scalar(select(func.coalesce(func.sum(ReturnItem.qty), 0)).join(ReturnRecord).where(ReturnRecord.transaction_id == tx.id, ReturnItem.transaction_item_id == original.id))
+        if requested.qty + returned_before > original.qty: raise HTTPException(400, "Return quantity exceeds original quantity")
+        batch = db.get(Batch, original.batch_id)
+        if expected_kind == "sale":
+            batch.qty += requested.qty
+        else:
+            if batch.qty < requested.qty: raise HTTPException(400, "Not enough stock for purchase return")
+            batch.qty -= requested.qty
+        line_total = Decimal(requested.qty) * original.unit_price
+        db.add(ReturnItem(return_id=record.id, transaction_item_id=original.id, batch_id=batch.id, qty=requested.qty, total=line_total))
+        total += line_total
+    record.total = total
+    balance_reduction = min(total, tx.due)
+    tx.due -= balance_reduction; tx.total = max(Decimal("0"), tx.total - total)
+    if tx.party_id and balance_reduction:
+        party = db.get(Party, tx.party_id); party.balance = max(Decimal("0"), party.balance - balance_reduction)
+    audit(db, user, "return", expected_kind, record.id); db.commit(); db.refresh(record)
+    return record
+
+
+@app.post("/api/sales/{sale_id}/return")
+def return_sale(sale_id: int, data: ReturnIn, db: Db, user: CurrentUser): return process_return(sale_id, "sale", data, db, user)
+
+
+@app.post("/api/purchases/{purchase_id}/return")
+def return_purchase(purchase_id: int, data: ReturnIn, db: Db, user: CurrentUser): return process_return(purchase_id, "purchase", data, db, user)
+
+
 @app.get("/api/transactions")
 def transactions(db: Db, user: CurrentUser, kind: str | None = None, limit: int = Query(100, le=500)):
     stmt = select(Transaction).order_by(Transaction.created_at.desc()).limit(limit)
     if kind: stmt = stmt.where(Transaction.kind == kind)
     return db.scalars(stmt).all()
+
+
+@app.get("/api/transactions/{transaction_id}")
+def transaction_detail(transaction_id: int, db: Db, user: CurrentUser):
+    tx = db.get(Transaction, transaction_id)
+    if not tx: raise HTTPException(404, "Transaction not found")
+    items = db.execute(select(TransactionItem, Medicine, Batch).join(Medicine, Medicine.id == TransactionItem.medicine_id).join(Batch, Batch.id == TransactionItem.batch_id).where(TransactionItem.transaction_id == tx.id)).all()
+    return {"transaction": tx, "items": [{"id": item.id, "medicine": medicine.name, "batch_no": batch.batch_no, "qty": item.qty, "unit_price": item.unit_price, "total": item.total} for item, medicine, batch in items]}
+
+
+@app.get("/api/returns")
+def returns(db: Db, user: CurrentUser):
+    return db.scalars(select(ReturnRecord).order_by(ReturnRecord.created_at.desc())).all()
 
 
 @app.post("/api/expenses")

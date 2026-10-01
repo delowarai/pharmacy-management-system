@@ -20,6 +20,8 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://pharmacy:change_me@db:5432/pharmacy
       JWT_SECRET: CHANGE_THIS_TO_A_RANDOM_64_CHARACTER_VALUE
+      INITIAL_ADMIN_USERNAME: admin
+      INITIAL_ADMIN_PASSWORD: CHANGE_THIS_BEFORE_FIRST_RUN
       CORS_ORIGINS: http://localhost:5173,http://localhost:8080
     ports: ["8000:8000"]
     depends_on:

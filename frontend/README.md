@@ -7,7 +7,7 @@ This responsive app works in desktop and mobile browsers. On Android/iOS, use th
 1. Open this folder in WebStorm.
 2. Copy `.env.example` to `.env`; set `VITE_API_URL` to the backend URL.
 3. In the terminal run `npm install`, then `npm run dev`.
-4. Open `http://localhost:5173` and sign in with `admin` / `Admin@123`.
+4. Open `http://localhost:5173` and sign in with the initial administrator credentials configured in the backend `.env`.
 
 ## Production build
 
