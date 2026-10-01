@@ -11,6 +11,8 @@ Internal pharmacy management and POS application built with FastAPI, React, Tail
 
 Read [`backend/README.md`](backend/README.md) and [`frontend/README.md`](frontend/README.md). Never commit `.env` files or production credentials.
 
+See [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) for the complete PyCharm/WebStorm folder map.
+
 ## Deployment
 
 - Backend and PostgreSQL: Render or a private Docker server.

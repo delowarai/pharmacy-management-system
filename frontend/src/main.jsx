@@ -2,10 +2,8 @@ import React,{useEffect,useMemo,useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import {LayoutDashboard,Pill,Boxes,ShoppingCart,Truck,Users,Receipt,LogOut,Menu,Plus,Search} from 'lucide-react';
 import './index.css';
-
-const API=import.meta.env.VITE_API_URL||'http://localhost:8000/api';
-async function api(path,options={}){const token=localStorage.getItem('token');const r=await fetch(API+path,{...options,headers:{...(options.body instanceof FormData?{}:{'Content-Type':'application/json'}),...(token?{Authorization:`Bearer ${token}`}:{}) ,...options.headers}});if(!r.ok)throw new Error((await r.json().catch(()=>({}))).detail||'Request failed');return r.json()}
-const money=n=>`৳${Number(n||0).toLocaleString('en-BD',{minimumFractionDigits:2})}`;
+import {api} from './services/api';
+import {money} from './utils/format';
 
 function Login({onLogin}){const [username,setUsername]=useState('admin'),[password,setPassword]=useState('Admin@123'),[error,setError]=useState('');async function submit(e){e.preventDefault();setError('');const body=new URLSearchParams({username,password});try{const r=await api('/auth/login',{method:'POST',body,headers:{'Content-Type':'application/x-www-form-urlencoded'}});localStorage.setItem('token',r.access_token);onLogin(r.user)}catch(x){setError(x.message)}}return <div className="min-h-screen grid place-items-center bg-gradient-to-br from-teal-900 to-slate-950 p-4"><form onSubmit={submit} className="card w-full max-w-sm p-8"><div className="text-4xl mb-3">💊</div><h1 className="text-2xl font-black">Pharmacy POS</h1><p className="text-slate-500 mb-6">Sign in to continue</p><label className="text-sm font-semibold">Username</label><input className="input mt-1 mb-4" value={username} onChange={e=>setUsername(e.target.value)}/><label className="text-sm font-semibold">Password</label><input type="password" className="input mt-1 mb-4" value={password} onChange={e=>setPassword(e.target.value)}/>{error&&<p className="text-red-600 text-sm mb-3">{error}</p>}<button className="btn primary w-full">Sign in</button><p className="text-xs text-slate-400 mt-4">First login: admin / Admin@123</p></form></div>}
 
